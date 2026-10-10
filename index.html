@@ -123,9 +123,9 @@ const MP_WASM = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wa
 const MP_MODEL = "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite";
 // 판단 가능성 모델 자리를 대신하는 공개 분류 모델(224x224 입력). 앞의 주소가 실패하면 다음 주소를 시도합니다.
 const ORT_MODELS = [
-  { name: "MobileNetV2 (onnx)", url: "./models/mobilenetv2.onnx" },
-  { name: "MobileNetV2 (HF)", url: "https://huggingface.co/Xenova/mobilenet_v2_1.0_224/resolve/main/onnx/model.onnx" },
-  { name: "ResNet-18 int8 (HF)", url: "https://huggingface.co/Xenova/resnet-18/resolve/main/onnx/model_quantized.onnx" },
+  { name: "MobileNetV2", url: "https://huggingface.co/onnx-community/mobilenet_v2_1.0_224/resolve/main/onnx/model.onnx" },
+  { name: "MobileNetV2 (zoo)", url: "https://huggingface.co/onnxmodelzoo/mobilenetv2-12/resolve/main/mobilenetv2-12.onnx" },
+  { name: "ResNet-18 int8", url: "https://huggingface.co/Xenova/resnet-18/resolve/main/onnx/model_quantized.onnx" },
 ];
 const WATCH = new Set(["bicycle", "motorcycle", "skateboard", "person"]);
 const RUNS = 10;
