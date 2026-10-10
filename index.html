@@ -1,0 +1,356 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>V-PARC 카메라 시험</title>
+<meta name="description" content="V-PARC 카메라 동작과 MediaPipe·ONNX 브라우저 추론 속도 측정 페이지">
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --text: #16181d; --muted: #5d6470; --line: #e2e5ea;
+    --accent: #1f6feb; --accent-text: #ffffff; --ok: #1a7f37; --warn: #9a6700; --bad: #cf222e;
+    --box: #ffb000;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0f1115; --card: #181b21; --text: #e8eaee; --muted: #9aa2ae; --line: #2a2f37;
+            --accent: #4c8dff; --accent-text: #0b0d10; --ok: #3fb950; --warn: #d29922; --bad: #f85149; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+         padding: env(safe-area-inset-top) 16px calc(24px + env(safe-area-inset-bottom)); }
+  main { max-width: 640px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 16px 0 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin: 0 0 12px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px; margin: 12px 0; }
+  .card h2 { font-size: 15px; margin: 0 0 10px; }
+  .stage { position: relative; width: 100%; aspect-ratio: 3 / 4; background: #000; border-radius: 12px; overflow: hidden; }
+  video, #overlay { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  .stage .hint { position: absolute; inset: 0; display: grid; place-items: center; color: #cfd3da; text-align: center; padding: 24px; font-size: 14px; }
+  .badge { position: absolute; left: 8px; top: 8px; background: rgba(0,0,0,.6); color: #fff; font-size: 12px; padding: 3px 8px; border-radius: 999px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  button { appearance: none; border: 0; border-radius: 10px; padding: 12px 14px; font: inherit; font-weight: 600;
+           background: var(--accent); color: var(--accent-text); flex: 1 1 140px; min-height: 44px; }
+  button.secondary { background: transparent; color: var(--text); border: 1px solid var(--line); }
+  button:disabled { opacity: .45; }
+  label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
+  input[type=text] { width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line);
+                     background: var(--bg); color: var(--text); font: inherit; }
+  .status { list-style: none; padding: 0; margin: 0; font-size: 14px; }
+  .status li { display: flex; justify-content: space-between; gap: 12px; padding: 6px 0; border-bottom: 1px solid var(--line); }
+  .status li:last-child { border-bottom: 0; }
+  .status .v { font-variant-numeric: tabular-nums; text-align: right; }
+  .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; font-variant-numeric: tabular-nums; }
+  th, td { text-align: right; padding: 6px 4px; border-bottom: 1px solid var(--line); }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; }
+  .note { font-size: 12px; color: var(--muted); margin: 8px 0 0; }
+  .progress { height: 6px; background: var(--line); border-radius: 999px; overflow: hidden; margin-top: 10px; }
+  .progress > div { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+  details { font-size: 13px; color: var(--muted); }
+  details pre { white-space: pre-wrap; word-break: break-all; font-size: 12px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>V-PARC 카메라 시험</h1>
+  <p class="sub">카메라가 켜지는지, 폰 브라우저에서 모델이 얼마나 빨리 도는지 잽니다. 영상은 이 폰 밖으로 전송되지 않습니다.</p>
+
+  <div class="stage" id="stage">
+    <video id="video" playsinline muted autoplay></video>
+    <canvas id="overlay"></canvas>
+    <div class="hint" id="hint">아래 ‘카메라 켜기’를 누르세요.<br>권한을 물으면 ‘허용’을 눌러 주세요.</div>
+    <div class="badge" id="fps" hidden>— fps</div>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <button id="btnStart">카메라 켜기</button>
+      <button id="btnBench" class="secondary" disabled>속도 측정 (10회)</button>
+    </div>
+    <div class="progress" id="prog" hidden><div></div></div>
+  </div>
+
+  <div class="card">
+    <h2>상태</h2>
+    <ul class="status">
+      <li><span>카메라</span><span class="v" id="sCam">꺼짐</span></li>
+      <li><span>MediaPipe 검출 모델</span><span class="v" id="sMp">대기</span></li>
+      <li><span>ONNX 분류 모델</span><span class="v" id="sOrt">대기</span></li>
+      <li><span>실시간 검출</span><span class="v" id="sLive">—</span></li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>기기 정보</h2>
+    <label for="model">기종 (직접 입력, 예: iPhone 13 mini)</label>
+    <input type="text" id="model" placeholder="iPhone 기종" autocomplete="off">
+    <ul class="status" style="margin-top:8px">
+      <li><span>OS</span><span class="v" id="dOs">—</span></li>
+      <li><span>브라우저</span><span class="v" id="dBrowser">—</span></li>
+      <li><span>CPU 스레드 / 화면</span><span class="v" id="dHw">—</span></li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>측정 결과 (ms)</h2>
+    <table>
+      <thead><tr><th>모델</th><th>로딩</th><th>첫 추론</th><th>평균</th><th>최소</th><th>최대</th></tr></thead>
+      <tbody>
+        <tr><td>MediaPipe</td><td id="rMpLoad">—</td><td id="rMpFirst">—</td><td id="rMpAvg">—</td><td id="rMpMin">—</td><td id="rMpMax">—</td></tr>
+        <tr><td>ONNX</td><td id="rOrtLoad">—</td><td id="rOrtFirst">—</td><td id="rOrtAvg">—</td><td id="rOrtMin">—</td><td id="rOrtMax">—</td></tr>
+      </tbody>
+    </table>
+    <p class="note">로딩 = 모델 다운로드와 초기화 시간. 첫 추론 = 처음 한 번(준비 포함). 평균·최소·최대 = 그다음 10회. 같은 화면 한 장으로 잽니다.</p>
+    <div class="row" style="margin-top:10px">
+      <button id="btnCopy" class="secondary" disabled>결과 복사 (시트에 붙여넣기용)</button>
+    </div>
+    <p class="note" id="copyMsg"></p>
+  </div>
+
+  <details>
+    <summary>기술 정보</summary>
+    <pre id="log"></pre>
+  </details>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/ort.min.js"></script>
+<script type="module">
+import { FilesetResolver, ObjectDetector } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+
+const MP_WASM = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm";
+const MP_MODEL = "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite";
+// 판단 가능성 모델 자리를 대신하는 공개 분류 모델(224x224 입력). 앞의 주소가 실패하면 다음 주소를 시도합니다.
+const ORT_MODELS = [
+  { name: "MobileNetV2 (onnx)", url: "./models/mobilenetv2.onnx" },
+  { name: "MobileNetV2 (HF)", url: "https://huggingface.co/Xenova/mobilenet_v2_1.0_224/resolve/main/onnx/model.onnx" },
+  { name: "ResNet-18 int8 (HF)", url: "https://huggingface.co/Xenova/resnet-18/resolve/main/onnx/model_quantized.onnx" },
+];
+const WATCH = new Set(["bicycle", "motorcycle", "skateboard", "person"]);
+const RUNS = 10;
+
+const $ = (id) => document.getElementById(id);
+const video = $("video"), overlay = $("overlay"), octx = overlay.getContext("2d");
+const logEl = $("log");
+const log = (m) => { logEl.textContent += `[${new Date().toLocaleTimeString()}] ${m}\n`; };
+const fmt = (x) => (x == null || Number.isNaN(x)) ? "—" : Math.round(x).toString();
+const setStatus = (id, text, cls) => { const el = $(id); el.textContent = text; el.className = "v " + (cls || ""); };
+
+const state = { detector: null, mpDelegate: "", mpLoad: null, ort: null, ortName: "", ortLoad: null, ortInput: "",
+                live: false, results: null, lastTs: 0 };
+
+// ---- 기기 정보 ----
+function deviceInfo() {
+  const ua = navigator.userAgent;
+  let os = "알 수 없음";
+  const ios = ua.match(/OS (\d+)_(\d+)(?:_(\d+))? like Mac OS X/);
+  const android = ua.match(/Android ([\d.]+)/);
+  if (ios) os = `iOS ${ios[1]}.${ios[2]}${ios[3] ? "." + ios[3] : ""}`;
+  else if (android) os = `Android ${android[1]}`;
+  else if (/Mac OS X/.test(ua)) os = "macOS";
+  else if (/Windows/.test(ua)) os = "Windows";
+  let browser = "알 수 없음";
+  if (/CriOS\/([\d.]+)/.test(ua)) browser = "Chrome(iOS) " + RegExp.$1;
+  else if (/FxiOS\/([\d.]+)/.test(ua)) browser = "Firefox(iOS) " + RegExp.$1;
+  else if (/Edg\/([\d.]+)/.test(ua)) browser = "Edge " + RegExp.$1;
+  else if (/Chrome\/([\d.]+)/.test(ua)) browser = "Chrome " + RegExp.$1;
+  else if (/Version\/([\d.]+).*Safari/.test(ua)) browser = "Safari " + RegExp.$1;
+  const hw = `${navigator.hardwareConcurrency || "?"} / ${screen.width}×${screen.height} @${window.devicePixelRatio}x`;
+  return { os, browser, hw, ua };
+}
+const dev = deviceInfo();
+$("dOs").textContent = dev.os; $("dBrowser").textContent = dev.browser; $("dHw").textContent = dev.hw;
+log("UA: " + dev.ua);
+try { const saved = localStorage.getItem("vparc-model"); if (saved) $("model").value = saved; } catch (e) {}
+$("model").addEventListener("change", () => { try { localStorage.setItem("vparc-model", $("model").value); } catch (e) {} });
+
+// ---- 카메라 ----
+async function startCamera() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    throw new Error("이 브라우저는 카메라를 지원하지 않습니다(https 주소인지 확인).");
+  }
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: false,
+    video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 960 } },
+  });
+  video.srcObject = stream;
+  await video.play();
+  await new Promise((r) => video.readyState >= 2 ? r() : video.addEventListener("loadeddata", r, { once: true }));
+  const s = stream.getVideoTracks()[0].getSettings();
+  setStatus("sCam", `켜짐 ${video.videoWidth}×${video.videoHeight}${s.facingMode ? " (" + (s.facingMode === "environment" ? "후면" : "전면") + ")" : ""}`, "ok");
+  $("hint").hidden = true;
+  log(`camera ${video.videoWidth}x${video.videoHeight} settings=${JSON.stringify(s)}`);
+}
+
+// ---- MediaPipe ----
+async function loadMediaPipe() {
+  setStatus("sMp", "불러오는 중…");
+  const t0 = performance.now();
+  const fileset = await FilesetResolver.forVisionTasks(MP_WASM);
+  const make = (delegate) => ObjectDetector.createFromOptions(fileset, {
+    baseOptions: { modelAssetPath: MP_MODEL, delegate },
+    runningMode: "VIDEO", scoreThreshold: 0.35, maxResults: 10,
+  });
+  let det, delegate = "GPU";
+  try { det = await make("GPU"); }
+  catch (e) { log("MediaPipe GPU 실패 → CPU: " + e.message); delegate = "CPU"; det = await make("CPU"); }
+  state.detector = det; state.mpDelegate = delegate; state.mpLoad = performance.now() - t0;
+  setStatus("sMp", `준비됨 · ${delegate} · ${fmt(state.mpLoad)}ms`, "ok");
+  log(`MediaPipe ready delegate=${delegate} load=${state.mpLoad.toFixed(0)}ms`);
+}
+
+// ---- ONNX Runtime ----
+async function loadOrt() {
+  setStatus("sOrt", "불러오는 중…");
+  const ort = window.ort;
+  if (!ort) throw new Error("onnxruntime-web 스크립트를 불러오지 못했습니다.");
+  ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/";
+  ort.env.wasm.numThreads = (self.crossOriginIsolated && navigator.hardwareConcurrency > 1) ? Math.min(4, navigator.hardwareConcurrency) : 1;
+  let lastErr;
+  for (const m of ORT_MODELS) {
+    const t0 = performance.now();
+    try {
+      const res = await fetch(m.url, { mode: "cors" });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const buf = await res.arrayBuffer();
+      const sess = await ort.InferenceSession.create(buf, { executionProviders: ["wasm"], graphOptimizationLevel: "all" });
+      state.ort = sess; state.ortName = m.name; state.ortInput = sess.inputNames[0];
+      state.ortLoad = performance.now() - t0;
+      setStatus("sOrt", `준비됨 · ${m.name} · wasm ${ort.env.wasm.numThreads}스레드 · ${fmt(state.ortLoad)}ms`, "ok");
+      log(`ORT ready model=${m.name} (${(buf.byteLength / 1e6).toFixed(1)}MB) input=${state.ortInput} load=${state.ortLoad.toFixed(0)}ms`);
+      return;
+    } catch (e) { lastErr = e; log(`ORT 모델 실패 ${m.url}: ${e.message}`); }
+  }
+  throw lastErr || new Error("ONNX 모델을 불러오지 못했습니다.");
+}
+
+// 프레임을 224x224 NCHW float32(ImageNet 정규화)로 바꿉니다.
+const prep = document.createElement("canvas"); prep.width = prep.height = 224;
+const pctx = prep.getContext("2d", { willReadFrequently: true });
+function toTensor(src) {
+  const sw = src.videoWidth || src.width, sh = src.videoHeight || src.height, side = Math.min(sw, sh);
+  pctx.drawImage(src, (sw - side) / 2, (sh - side) / 2, side, side, 0, 0, 224, 224);
+  const { data } = pctx.getImageData(0, 0, 224, 224);
+  const n = 224 * 224, out = new Float32Array(3 * n);
+  const mean = [0.485, 0.456, 0.406], std = [0.229, 0.224, 0.225];
+  for (let i = 0; i < n; i++) {
+    out[i] = (data[i * 4] / 255 - mean[0]) / std[0];
+    out[n + i] = (data[i * 4 + 1] / 255 - mean[1]) / std[1];
+    out[2 * n + i] = (data[i * 4 + 2] / 255 - mean[2]) / std[2];
+  }
+  return new window.ort.Tensor("float32", out, [1, 3, 224, 224]);
+}
+
+// ---- 실시간 검출 ----
+let frames = 0, fpsT = performance.now();
+function nextTs() { const t = performance.now(); state.lastTs = Math.max(t, state.lastTs + 1); return state.lastTs; }
+function draw(dets) {
+  const w = overlay.clientWidth, h = overlay.clientHeight, dpr = window.devicePixelRatio || 1;
+  if (overlay.width !== w * dpr) { overlay.width = w * dpr; overlay.height = h * dpr; }
+  octx.setTransform(dpr, 0, 0, dpr, 0, 0); octx.clearRect(0, 0, w, h);
+  const vw = video.videoWidth, vh = video.videoHeight, sc = Math.max(w / vw, h / vh);
+  const ox = (w - vw * sc) / 2, oy = (h - vh * sc) / 2;
+  octx.lineWidth = 3; octx.font = "600 13px -apple-system, sans-serif";
+  for (const d of dets) {
+    const c = d.categories[0]; if (!c || !WATCH.has(c.categoryName)) continue;
+    const b = d.boundingBox, x = ox + b.originX * sc, y = oy + b.originY * sc;
+    octx.strokeStyle = "#ffb000"; octx.strokeRect(x, y, b.width * sc, b.height * sc);
+    const label = `${c.categoryName} ${Math.round(c.score * 100)}%`;
+    octx.fillStyle = "#ffb000"; octx.fillRect(x, y - 18, octx.measureText(label).width + 8, 18);
+    octx.fillStyle = "#111"; octx.fillText(label, x + 4, y - 5);
+  }
+}
+function loop() {
+  if (!state.live) return;
+  if (state.detector && video.readyState >= 2) {
+    const r = state.detector.detectForVideo(video, nextTs());
+    draw(r.detections);
+    frames++;
+    const now = performance.now();
+    if (now - fpsT > 1000) {
+      const fps = frames * 1000 / (now - fpsT); frames = 0; fpsT = now;
+      $("fps").textContent = fps.toFixed(1) + " fps"; $("fps").hidden = false;
+      const seen = r.detections.map((d) => d.categories[0]?.categoryName).filter((n) => WATCH.has(n));
+      setStatus("sLive", seen.length ? "보임: " + [...new Set(seen)].join(", ") : "대상 없음");
+    }
+  }
+  requestAnimationFrame(loop);
+}
+
+// ---- 속도 측정 ----
+const stats = (a) => ({ avg: a.reduce((s, x) => s + x, 0) / a.length, min: Math.min(...a), max: Math.max(...a) });
+const tick = () => new Promise((r) => setTimeout(r, 0));
+async function benchmark() {
+  state.live = false;
+  $("btnBench").disabled = true; $("btnCopy").disabled = true;
+  const prog = $("prog"), bar = prog.firstElementChild; prog.hidden = false;
+  const total = (RUNS + 1) * 2; let done = 0; const step = () => { bar.style.width = (++done / total * 100) + "%"; };
+  const frame = document.createElement("canvas");
+  frame.width = video.videoWidth; frame.height = video.videoHeight;
+  frame.getContext("2d").drawImage(video, 0, 0);
+  const res = {};
+  try {
+    if (state.detector) {
+      const t = [];
+      for (let i = 0; i <= RUNS; i++) { const t0 = performance.now(); state.detector.detectForVideo(frame, nextTs()); t.push(performance.now() - t0); step(); await tick(); }
+      res.mp = { first: t[0], ...stats(t.slice(1)) };
+    }
+    if (state.ort) {
+      const t = [];
+      for (let i = 0; i <= RUNS; i++) {
+        const t0 = performance.now();
+        const out = await state.ort.run({ [state.ortInput]: toTensor(frame) });
+        t.push(performance.now() - t0);
+        if (i === 0) log("ORT output dims " + JSON.stringify(Object.values(out)[0].dims));
+        step(); await tick();
+      }
+      res.ort = { first: t[0], ...stats(t.slice(1)) };
+    }
+  } catch (e) { log("측정 오류: " + e.message); alert("측정 중 오류: " + e.message); }
+  state.results = res;
+  const put = (k, r, load) => { $(`r${k}Load`).textContent = fmt(load); if (!r) return;
+    $(`r${k}First`).textContent = fmt(r.first); $(`r${k}Avg`).textContent = fmt(r.avg); $(`r${k}Min`).textContent = fmt(r.min); $(`r${k}Max`).textContent = fmt(r.max); };
+  put("Mp", res.mp, state.mpLoad); put("Ort", res.ort, state.ortLoad);
+  log("benchmark " + JSON.stringify(res));
+  prog.hidden = true; bar.style.width = "0";
+  $("btnBench").disabled = false; $("btnCopy").disabled = false;
+  state.live = true; requestAnimationFrame(loop);
+}
+
+// 시트에 바로 붙여 넣을 수 있게 탭으로 구분한 한 줄을 만듭니다.
+function resultLine() {
+  const r = state.results || {}, mp = r.mp || {}, o = r.ort || {};
+  const d = new Date(), date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  return [date, $("model").value || "(기종 미입력)", dev.os, dev.browser,
+    fmt(state.mpLoad), fmt(mp.first), fmt(mp.avg), fmt(mp.min), fmt(mp.max), state.mpDelegate,
+    fmt(state.ortLoad), fmt(o.first), fmt(o.avg), fmt(o.min), fmt(o.max), state.ortName,
+    `${video.videoWidth}x${video.videoHeight}`].join("\t");
+}
+async function copyResult() {
+  const line = resultLine();
+  try { await navigator.clipboard.writeText(line); $("copyMsg").textContent = "복사했어요. 시트의 한 행에 붙여 넣으세요."; }
+  catch (e) {
+    const ta = document.createElement("textarea"); ta.value = line; document.body.appendChild(ta); ta.select();
+    try { document.execCommand("copy"); $("copyMsg").textContent = "복사했어요. 시트의 한 행에 붙여 넣으세요."; }
+    catch (e2) { $("copyMsg").textContent = "자동 복사가 안 됩니다. 아래 줄을 길게 눌러 복사하세요: " + line; }
+    ta.remove();
+  }
+}
+
+$("btnStart").addEventListener("click", async () => {
+  $("btnStart").disabled = true;
+  try { await startCamera(); }
+  catch (e) { setStatus("sCam", "실패", "bad"); $("hint").textContent = "카메라를 켜지 못했습니다: " + e.message; log("camera error: " + e.name + " " + e.message); $("btnStart").disabled = false; return; }
+  const jobs = [loadMediaPipe().catch((e) => { setStatus("sMp", "실패", "bad"); log("MediaPipe error: " + e.message); }),
+                loadOrt().catch((e) => { setStatus("sOrt", "실패", "bad"); log("ORT error: " + e.message); })];
+  state.live = true; requestAnimationFrame(loop);
+  await Promise.all(jobs);
+  if (state.detector || state.ort) $("btnBench").disabled = false;
+  $("btnStart").textContent = "카메라 켜짐";
+});
+$("btnBench").addEventListener("click", benchmark);
+$("btnCopy").addEventListener("click", copyResult);
+</script>
+</body>
+</html>
