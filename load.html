@@ -286,7 +286,8 @@ async function runScenario(q) {
   };
   let job = pre ? load() : null;
   for (let s = waitSec; s > 0; s--) { $("simMeta").textContent = `${s}초 뒤에 ‘주차 사진 찍기’를 누릅니다${pre ? " · 모델 미리 받는 중" : ""}`; await sleep(1000); }
-  const tap = now();
+  // 미리 받는 동안엔 화면이 잠깐 멈춰 타이머가 늦게 울릴 수 있어서, 누르려던 시점(화면 뜬 뒤 N초)을 기준으로 잼
+  const tap = pre ? t0 + waitSec * 1000 : now();
   $("simCta").style.opacity = ".5"; $("simMeta").textContent = "눌렀어요 · 모델 준비 기다리는 중…";
   if (!job) job = load();
   try {
