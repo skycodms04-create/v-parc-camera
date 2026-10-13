@@ -63,7 +63,7 @@
     <div class="start" id="start">
       <div>킥보드 바퀴 두 개와 바닥이<br>다 보이게 찍어 주세요.</div>
       <button id="btnStart">카메라 켜기</button>
-      <div style="font-size:13px;color:#8a8a8a">사진은 휴대폰에서만 확인하고 서버로 보내지 않아요</div>
+      <div style="font-size:13px;color:#8a8a8a">원본 사진과 위치는 휴대폰 밖으로 나가지 않아요</div>
     </div>
   </div>
 
@@ -74,22 +74,25 @@
     <button class="text gray" id="btnRetake">다시 찍기</button>
     <button class="text white" id="btnUse">이 사진으로 반납</button>
   </div>
-  <div class="foot" id="foot">시험용 화면 · 안내 문구는 화면 밝기·흔들림·킥보드 위치로 정해요</div>
+  <div class="foot" id="foot">시험용 화면 · 계획서 A2 규칙(우선순위·5프레임 평균·1.5초 유지)으로 문구를 골라요</div>
 </div>
 
 <script type="module">
-// ---- 안내 문구 (한 번에 한 줄만 보여줌, 위에서부터 먼저 걸리는 것 하나) ----
+// ---- 안내 문구: 계획서 A2 ----
+// 초당 3번 분석, 최근 5번 중 3번 이상(0.6) 걸린 사유 중 우선순위가 가장 높은 것 하나만 띄움.
+// 문구가 바뀐 지 1.5초가 지나지 않았으면 바꾸지 않음. 3번 연속 통과하면 준비 완료(보조선 초록).
 const HINTS = {
-  dark:   { text: "너무 어두워요. 밝은 곳에서 찍어주세요" },
-  blur:   { text: "흔들렸어요. 잠깐 멈춰주세요" },
-  none:   { text: "킥보드가 화면에 들어오게 찍어주세요" },
-  wheels: { text: "바퀴가 안 보여요. 한 걸음 뒤로 가주세요" },
-  close:  { text: "너무 가까워요. 한 걸음 뒤로 가주세요" },
-  far:    { text: "조금 더 가까이 가주세요" },
-  ok:     { text: "좋아요. 이대로 찍어주세요", ok: true },
-  loading:{ text: "준비 중이에요" },
+  none:    { text: "킥보드가 화면에 들어오게 찍어주세요" },
+  cut:     { text: "킥보드 전체가 들어오게 해 주세요" },
+  floor:   { text: "바닥이 더 보이게 한 걸음 물러나 주세요" },
+  blur:    { text: "흔들렸어요. 잠깐 멈춰주세요" },
+  light:   { text: "빛을 등지고 밝은 쪽에서 찍어주세요" },
+  ready:   { text: "좋아요. 이대로 찍어주세요", ok: true },
+  wait:    { text: "지금 찍어도 돼요. 나중에 다시 확인할 수 있어요" },
+  loading: { text: "준비 중이에요" },
 };
-const T = { dark: 45, blur: 150, minArea: 0.08, maxSide: 0.97, bottomEdge: 0.97, stableMs: 500 };
+const ORDER = ["none", "cut", "floor", "blur", "light"];      // A2 우선순위
+const T = { dark: 45, backlight: 70, blur: 150, edge: 0.02, floor: 0.97, everyMs: 333, win: 5, need: 0.6, holdMs: 1500, readyN: 3, giveUpMs: 15000 };
 const TARGET = new Set(["bicycle", "motorcycle", "skateboard"]); // 킥보드는 COCO에 없어서 비슷한 클래스로 대신 잡음
 
 const MP_VER = "0.10.14";
@@ -99,65 +102,78 @@ const MP_MODEL = "https://storage.googleapis.com/mediapipe-models/object_detecto
 
 const $ = (id) => document.getElementById(id);
 const video = $("video");
-const state = { detector: null, live: false, lastTs: 0, shown: null, pending: null, pendingSince: 0, lastCheck: 0, current: "loading" };
+const state = { detector: null, live: false, lastTs: 0, lastCheck: 0, hist: [], okRun: 0, shown: null, shownAt: -1e9, startedAt: 0, current: "loading" };
 
-// 작은 회색조 이미지로 밝기·흔들림을 잼 (160x120)
+// 작은 회색조 이미지로 밝기·흔들림·역광을 잼 (160x120)
 const small = document.createElement("canvas"); small.width = 160; small.height = 120;
 const sctx = small.getContext("2d", { willReadFrequently: true });
 function measure() {
   sctx.drawImage(video, 0, 0, 160, 120);
   const d = sctx.getImageData(0, 0, 160, 120).data, g = new Float32Array(160 * 120);
-  let sum = 0;
-  for (let i = 0; i < g.length; i++) { g[i] = 0.299 * d[i * 4] + 0.587 * d[i * 4 + 1] + 0.114 * d[i * 4 + 2]; sum += g[i]; }
-  // 라플라시안 분산: 낮을수록 흐림
-  let m = 0, m2 = 0, n = 0;
+  let sum = 0, top = 0, mid = 0;
+  for (let i = 0; i < g.length; i++) {
+    g[i] = 0.299 * d[i * 4] + 0.587 * d[i * 4 + 1] + 0.114 * d[i * 4 + 2]; sum += g[i];
+    const y = Math.floor(i / 160); if (y < 40) top += g[i]; else if (y < 80) mid += g[i];
+  }
+  let m = 0, m2 = 0, n = 0;                       // 라플라시안 분산: 낮을수록 흐림
   for (let y = 1; y < 119; y++) for (let x = 1; x < 159; x++) {
     const i = y * 160 + x, v = 4 * g[i] - g[i - 1] - g[i + 1] - g[i - 160] - g[i + 160];
     m += v; m2 += v * v; n++;
   }
   m /= n;
-  return { bright: sum / g.length, sharp: m2 / n - m * m };
+  return { bright: sum / g.length, back: (top - mid) / (160 * 40), sharp: m2 / n - m * m };
 }
 
-function decide(dets) {
-  const { bright, sharp } = measure();
-  window.__last = { bright: Math.round(bright), sharp: Math.round(sharp) };
-  if (bright < T.dark) return "dark";
-  if (sharp < T.blur) return "blur";
-  if (!state.detector && !window.__mockDets) return "ok"; // 검출 모델을 못 불러오면 밝기·흔들림만 봄
+// 이번 프레임에서 걸린 사유들 (없으면 빈 집합 = 통과)
+function reasons(dets) {
+  const out = new Set();
+  const { bright, back, sharp } = measure();
+  window.__last = { bright: Math.round(bright), back: Math.round(back), sharp: Math.round(sharp) };
+  if (sharp < T.blur) out.add("blur");
+  if (bright < T.dark || back > T.backlight) out.add("light");
+  if (!state.detector && !window.__mockDets) return out;   // 검출 모델을 못 불러오면 화면 상태만 봄
   const vw = video.videoWidth, vh = video.videoHeight;
   const boxes = dets.filter((d) => TARGET.has(d.categories[0]?.categoryName)).map((d) => d.boundingBox);
-  if (!boxes.length) return "none";
+  if (!boxes.length) { out.add("none"); return out; }
   const b = boxes.sort((a, c) => c.width * c.height - a.width * a.height)[0];
-  const bottom = (b.originY + b.height) / vh, area = (b.width * b.height) / (vw * vh);
-  if (b.width / vw > T.maxSide && b.height / vh > T.maxSide) return "close";
-  if (bottom > T.bottomEdge) return "wheels";
-  if (area < T.minArea) return "far";
-  return "ok";
+  const l = b.originX / vw, r = (b.originX + b.width) / vw, t = b.originY / vh, bt = (b.originY + b.height) / vh;
+  if (l < T.edge || r > 1 - T.edge || t < T.edge) out.add("cut");
+  if (bt > T.floor) out.add("floor");
+  return out;
 }
 
-// 문구가 깜빡이지 않게: 같은 판정이 0.5초 이어질 때만 바꿈
-function show(key, now) {
-  if (key !== state.pending) { state.pending = key; state.pendingSince = now; }
-  if (state.shown === null || (key !== state.shown && now - state.pendingSince >= T.stableMs)) {
-    state.shown = key;
-    const h = HINTS[key];
-    $("hintText").textContent = h.text;
-    $("pill").classList.toggle("ok", !!h.ok);
-    $("frame").classList.toggle("ok", !!h.ok);
-  }
+function setHint(key, now) {
+  if (key === state.shown) return;
+  if (state.shown !== null && state.shown !== "loading" && now - state.shownAt < T.holdMs) return;  // 1.5초 유지
+  state.shown = key; state.shownAt = now;
+  const h = HINTS[key];
+  $("hintText").textContent = h.text;
+  $("pill").classList.toggle("ok", !!h.ok);
+  $("frame").classList.toggle("ok", !!h.ok);
+}
+
+function step(dets, now) {
+  const r = reasons(dets);
+  state.hist.push(r); if (state.hist.length > T.win) state.hist.shift();
+  state.okRun = r.size === 0 ? state.okRun + 1 : 0;
+  const ready = state.okRun >= T.readyN;
+  // 최근 5번 중 60% 이상 걸린 사유 가운데 우선순위가 가장 높은 것
+  const top = ORDER.find((k) => state.hist.filter((h) => h.has(k)).length / state.hist.length >= T.need);
+  let key = ready ? "ready" : (top || (state.shown === "ready" ? "ready" : state.shown || "loading"));
+  if (!ready && now - state.startedAt > T.giveUpMs && top) key = "wait";   // S2: 15초가 지나도 미달이면 셔터는 열어 둔 채 안내만
+  state.current = ready ? "ready" : (top || "pending");
+  setHint(key, now);
 }
 
 function nextTs() { const t = performance.now(); state.lastTs = Math.max(t, state.lastTs + 1); return state.lastTs; }
 function loop(now) {
   if (!state.live) return;
-  if (video.readyState >= 2 && now - state.lastCheck > 120) {
+  if (video.readyState >= 2 && now - state.lastCheck > T.everyMs) {
     state.lastCheck = now;
     let dets = [];
     if (window.__mockDets) dets = window.__mockDets(video);              // 시험용
     else if (state.detector) dets = state.detector.detectForVideo(video, nextTs()).detections;
-    state.current = decide(dets);
-    show(state.current, now);
+    step(dets, now);
   }
   requestAnimationFrame(loop);
 }
@@ -194,13 +210,14 @@ $("btnStart").addEventListener("click", async () => {
     return;
   }
   $("start").hidden = true; $("frame").hidden = false; $("pill").hidden = false;
-  show("loading", performance.now());
+  setHint("loading", performance.now());
+  state.startedAt = performance.now();
   state.live = true; requestAnimationFrame(loop);
   if (!window.__mockDets) await loadDetector();
   $("btnShutter").disabled = false;
 });
 
-// 셔터: 지금 화면을 멈춰서 보여줌. 사진은 서버로 보내지 않음.
+// 셔터: 잠그지 않음. 지금 화면을 멈춰서 보여줌. 원본은 휴대폰 밖으로 보내지 않음(가린 사진만 서버로).
 $("btnShutter").addEventListener("click", () => {
   const c = $("shot"); c.width = video.videoWidth; c.height = video.videoHeight;
   c.getContext("2d").drawImage(video, 0, 0);
@@ -208,15 +225,16 @@ $("btnShutter").addEventListener("click", () => {
   c.style.display = "block"; video.style.visibility = "hidden";
   $("frame").hidden = true; $("barShoot").hidden = true; $("barReview").hidden = false;
   $("title").textContent = "사진 확인";
-  const h = HINTS[state.current] || HINTS.ok;
-  $("hintText").textContent = h.ok ? "잘 찍혔어요" : h.text;
-  $("pill").classList.toggle("ok", !!h.ok);
+  const ok = state.current === "ready";
+  $("hintText").textContent = ok ? "잘 찍혔어요" : "판정이 애매하면 추가 확인으로 접수돼요";
+  $("pill").classList.toggle("ok", ok);
 });
 $("btnRetake").addEventListener("click", () => {
   $("shot").style.display = "none"; video.style.visibility = "visible";
   $("frame").hidden = false; $("barShoot").hidden = false; $("barReview").hidden = true;
   $("title").textContent = "주차 사진";
-  state.shown = null; state.live = true; requestAnimationFrame(loop);
+  state.shown = null; state.hist = []; state.okRun = 0; state.startedAt = performance.now();
+  state.live = true; requestAnimationFrame(loop);
 });
 $("btnUse").addEventListener("click", () => {
   $("hintText").textContent = "판정 연결은 다음 단계에서 붙여요";
